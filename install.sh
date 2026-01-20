@@ -1,13 +1,22 @@
 #!/bin/bash
 
+# ==========================================
+# 颜色定义
+# ==========================================
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+# ==========================================
+# 基础变量
+# ==========================================
 cur_dir=$(pwd)
 script_dir=$(cd "$(dirname "$0")" && pwd)
 
+# ==========================================
+# 环境检查
+# ==========================================
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
 if [[ -f /etc/redhat-release ]]; then
@@ -70,6 +79,9 @@ elif [[ x"${release}" == x"debian" ]]; then
     fi
 fi
 
+# ==========================================
+# 基础安装函数
+# ==========================================
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install epel-release wget curl unzip tar crontabs socat ca-certificates -y >/dev/null 2>&1
@@ -93,6 +105,9 @@ install_base() {
     fi
 }
 
+# ==========================================
+# BBR 优化
+# ==========================================
 enable_bbr() {
     echo -e "${green}正在开启 BBR 加速并优化系统参数...${plain}"
     
@@ -143,6 +158,9 @@ EOF
     echo -e "${green}BBR 及系统优化参数应用完成${plain}"
 }
 
+# ==========================================
+# 状态检查
+# ==========================================
 check_status() {
     if [[ ! -f ${install_dir}${app_name} ]]; then
         return 2
@@ -172,6 +190,9 @@ check_ipv6_support() {
     fi
 }
 
+# ==========================================
+# 配置文件解析与校验
+# ==========================================
 parse_config_file() {
     local file=$1
     if [[ ! -f "$file" ]]; then
@@ -196,15 +217,17 @@ validate_config() {
         echo -e "${red}配置文件缺少必要信息 (backend_url, backend_key, node_id)${plain}"
         exit 1
     fi
-    # 只有 v2bx 需要 core_type 和 transport_type
-    if [[ "$app_type" == "v2bx" ]]; then
-        if [[ -z "$core_type" || -z "$transport_type" ]]; then
-            echo -e "${red}V2bX 需要指定 core_type 和 transport_type${plain}"
-            exit 1
-        fi
+    
+    # 强制检查 V2bX 必要参数（因为已移除 v2node 支持）
+    if [[ -z "$core_type" || -z "$transport_type" ]]; then
+        echo -e "${red}错误：核心类型(core_type)和传输类型(transport_type)不能为空！${plain}"
+        exit 1
     fi
 }
 
+# ==========================================
+# 自动生成配置 (仅 V2bX)
+# ==========================================
 auto_generate_config() {
     # 停止服务
     if [[ x"${release}" == x"alpine" ]]; then
@@ -213,137 +236,120 @@ auto_generate_config() {
         systemctl stop ${app_name} >/dev/null 2>&1
     fi
 
-    if [[ "$app_type" == "v2node" ]]; then
-        # ================= v2node 专用配置结构 =================
-        echo -e "${green}生成 v2node 配置文件...${plain}"
-        cat <<EOF > ${config_dir}config.json
-{
-    "Log": {
-        "Level": "warning",
-        "Output": "",
-        "Access": "none"
-    },
-    "Nodes": [
-        {
-            "ApiHost": "$backend_url",
-            "NodeID": $node_id,
-            "ApiKey": "$backend_key",
-            "Timeout": 15
+    # [保留说明] 如果以后要添加 v2node 支持，在此处添加 if 判断即可
+    # 当前仅执行 V2bX 的配置生成逻辑
+
+    # ================= V2bX 完整配置结构 =================
+    echo -e "${green}生成 V2bX 配置文件...${plain}"
+    local core="xray"
+    local core_xray=false
+    local core_sing=false
+    local core_hysteria2=false
+
+    core_type=$(echo "$core_type" | tr '[:upper:]' '[:lower:]')
+    transport_type=$(echo "$transport_type" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$core_type" == "xray" ]]; then
+        core="xray"
+        core_xray=true
+    elif [[ "$core_type" == "singbox" || "$core_type" == "sing" ]]; then
+        core="sing"
+        core_sing=true
+    elif [[ "$core_type" == "hysteria2" ]]; then
+        core="hysteria2"
+        core_hysteria2=true
+    fi
+
+    local node_type="$transport_type"
+    local cert_mode="none"
+    if [[ -n "$cert_domain" ]]; then
+        cert_mode="file"
+    fi
+
+    local ipv6_support=$(check_ipv6_support)
+    local listen_ip="0.0.0.0"
+    if [ "$ipv6_support" -eq 1 ]; then
+        listen_ip="::"
+    fi
+
+    local cores_config="["
+    if [ "$core_xray" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"xray\",
+        \"Log\": {
+            \"Level\": \"error\",
+            \"ErrorPath\": \"${config_dir}error.log\"
+        },
+        \"OutboundConfigPath\": \"${config_dir}custom_outbound.json\",
+        \"RouteConfigPath\": \"${config_dir}route.json\"
+    },"
+    fi
+    if [ "$core_sing" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"sing\",
+        \"Log\": {
+            \"Level\": \"error\",
+            \"Timestamp\": true
+        },
+        \"NTP\": {
+            \"Enable\": false,
+            \"Server\": \"time.apple.com\",
+            \"ServerPort\": 0
+        },
+        \"OriginalPath\": \"${config_dir}sing_origin.json\"
+    },"
+    fi
+    if [ "$core_hysteria2" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"hysteria2\",
+        \"Log\": {
+            \"Level\": \"error\"
         }
-    ]
-}
-EOF
-    else
-        # ================= V2bX 完整配置结构 =================
-        echo -e "${green}生成 V2bX 配置文件...${plain}"
-        local core="xray"
-        local core_xray=false
-        local core_sing=false
-        local core_hysteria2=false
+    },"
+    fi
+    cores_config+="]"
+    cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
 
-        core_type=$(echo "$core_type" | tr '[:upper:]' '[:lower:]')
-        transport_type=$(echo "$transport_type" | tr '[:upper:]' '[:lower:]')
-
-        if [[ "$core_type" == "xray" ]]; then
-            core="xray"
-            core_xray=true
-        elif [[ "$core_type" == "singbox" || "$core_type" == "sing" ]]; then
-            core="sing"
-            core_sing=true
-        elif [[ "$core_type" == "hysteria2" ]]; then
-            core="hysteria2"
-            core_hysteria2=true
-        fi
-
-        local node_type="$transport_type"
-        local cert_mode="none"
-        if [[ -n "$cert_domain" ]]; then
-            cert_mode="file"
-        fi
-
-        local ipv6_support=$(check_ipv6_support)
-        local listen_ip="0.0.0.0"
-        if [ "$ipv6_support" -eq 1 ]; then
-            listen_ip="::"
-        fi
-
-        local cores_config="["
-        if [ "$core_xray" = true ]; then
-            cores_config+="
-        {
-            \"Type\": \"xray\",
-            \"Log\": {
-                \"Level\": \"error\",
-                \"ErrorPath\": \"${config_dir}error.log\"
-            },
-            \"OutboundConfigPath\": \"${config_dir}custom_outbound.json\",
-            \"RouteConfigPath\": \"${config_dir}route.json\"
-        },"
-        fi
-        if [ "$core_sing" = true ]; then
-            cores_config+="
-        {
-            \"Type\": \"sing\",
-            \"Log\": {
-                \"Level\": \"error\",
-                \"Timestamp\": true
-            },
-            \"NTP\": {
-                \"Enable\": false,
-                \"Server\": \"time.apple.com\",
-                \"ServerPort\": 0
-            },
-            \"OriginalPath\": \"${config_dir}sing_origin.json\"
-        },"
-        fi
-        if [ "$core_hysteria2" = true ]; then
-            cores_config+="
-        {
-            \"Type\": \"hysteria2\",
-            \"Log\": {
-                \"Level\": \"error\"
-            }
-        },"
-        fi
-        cores_config+="]"
-        cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
-
-        local node_config=""
-        if [ "$core_type" == "xray" ]; then
-            node_config=$(cat <<EOF
+    local node_config=""
+    if [ "$core_type" == "xray" ]; then
+        node_config=$(cat <<EOF
 {
-                "Core": "$core",
-                "ApiHost": "$backend_url",
-                "ApiKey": "$backend_key",
-                "NodeID": $node_id,
-                "NodeType": "$node_type",
-                "Timeout": 30,
-                "ListenIP": "$listen_ip",
-                "SendIP": "0.0.0.0",
-                "DeviceOnlineMinTraffic": 200,
-                "MinReportTraffic": 0,
-                "EnableProxyProtocol": false,
-                "EnableUot": true,
-                "EnableTFO": true,
-                "DNSType": "UseIPv4",
-                "CertConfig": {
-                    "CertMode": "$cert_mode",
-                    "RejectUnknownSni": false,
-                    "CertDomain": "$cert_domain",
-                    "CertFile": "${config_dir}fullchain.cer",
-                    "KeyFile": "${config_dir}cert.key",
-                    "Email": "${app_name_lower}@github.com",
-                    "Provider": "cloudflare",
-                    "DNSEnv": {
-                        "EnvName": "env1"
-                    }
+            "Core": "$core",
+            "ApiHost": "$backend_url",
+            "ApiKey": "$backend_key",
+            "NodeID": $node_id,
+            "NodeType": "$node_type",
+            "Timeout": 30,
+            "ListenIP": "$listen_ip",
+            "SendIP": "0.0.0.0",
+            "DeviceOnlineMinTraffic": 200,
+            "MinReportTraffic": 0,
+            "EnableProxyProtocol": false,
+            "EnableUot": true,
+            "EnableTFO": true,
+            "DNSType": "UseIPv4",
+            "CertConfig": {
+                "CertMode": "$cert_mode",
+                "RejectUnknownSni": false,
+                "CertDomain": "$cert_domain",
+                "CertFile": "${config_dir}fullchain.cer",
+                "KeyFile": "${config_dir}cert.key",
+                "Email": "${app_name_lower}@github.com",
+                "Provider": "cloudflare",
+                "DNSEnv": {
+                    "EnvName": "env1"
                 }
             }
+        }
 EOF
 )
-        fi
+    fi
+    # [TODO] 此处可补充非 Xray 核心的 node_config 逻辑
 
-        cat <<EOF > ${config_dir}config.json
+    cat <<EOF > ${config_dir}config.json
 {
     "Log": {
         "Level": "error",
@@ -354,7 +360,7 @@ EOF
 }
 EOF
 
-        cat <<EOF > ${config_dir}custom_outbound.json
+    cat <<EOF > ${config_dir}custom_outbound.json
 [
     {
         "tag": "IPv4_out",
@@ -377,7 +383,7 @@ EOF
 ]
 EOF
 
-        cat <<EOF > ${config_dir}route.json
+    cat <<EOF > ${config_dir}route.json
 {
     "domainStrategy": "AsIs",
     "rules": [
@@ -401,19 +407,19 @@ EOF
 }
 EOF
 
-        if [ "$core_sing" = true ]; then
-            if [[ ! -f ${config_dir}sing_origin.json ]]; then
-                cat <<EOF > ${config_dir}sing_origin.json
+    if [ "$core_sing" = true ]; then
+        if [[ ! -f ${config_dir}sing_origin.json ]]; then
+            cat <<EOF > ${config_dir}sing_origin.json
 {
     "log": {
         "level": "error"
     }
 }
 EOF
-            fi
         fi
-    fi 
+    fi
 
+    # 重启并检查
     if [[ x"${release}" == x"alpine" ]]; then
         service ${app_name} restart
     else
@@ -426,6 +432,9 @@ EOF
     fi
 }
 
+# ==========================================
+# ACME 证书相关
+# ==========================================
 configure_acme_account() {
     local acme_account_conf="/root/.acme.sh/account.conf"
     mkdir -p /root/.acme.sh
@@ -449,7 +458,6 @@ configure_acme_account() {
     local cf_email_sanitized="${cf_email_value//\'/}"
     local default_acme_server="https://acme-v02.api.letsencrypt.org/directory"
     cat <<EOF > "$acme_account_conf"
-UPGRADE_HASH='1bd2922bc37cddba97765af2ae12ad5441c91a74'
 ACCOUNT_EMAIL='${acme_email_sanitized}'
 SAVED_CF_Key='${cf_key_sanitized}'
 SAVED_CF_Email='${cf_email_sanitized}'
@@ -516,6 +524,9 @@ issue_certificate() {
     fi
 }
 
+# ==========================================
+# 应用安装逻辑
+# ==========================================
 install_app() {
     if [[ -f ${install_dir}${app_name} && "$force_reinstall" != true ]]; then
         echo -e "${yellow}检测到 ${app_name} 已安装，跳过下载步骤...${plain}"
@@ -571,6 +582,7 @@ install_app() {
     cp geoip.dat ${config_dir}
     cp geosite.dat ${config_dir}
 
+    # 服务文件安装
     if [[ x"${release}" == x"alpine" ]]; then
         rm /etc/init.d/${app_name} -f
         cat <<EOF > /etc/init.d/${app_name}
@@ -615,6 +627,7 @@ EOF
         systemctl enable ${app_name}
     fi
 
+    # CLI 管理脚本
     cat <<EOF > /usr/bin/${app_name_lower}
 #!/bin/bash
 cmd="\$1"
@@ -678,6 +691,7 @@ esac
 EOF
     chmod +x /usr/bin/${app_name_lower}
 
+    # 仅为 V2bX 创建别名
     if [[ "$app_type" == "v2bx" ]] && [ ! -L /usr/bin/v2bx ]; then
         ln -s /usr/bin/${app_name_lower} /usr/bin/v2bx
         chmod +x /usr/bin/v2bx
@@ -688,19 +702,13 @@ EOF
 
 detect_installed_app() {
     local has_v2bx=false
-    local has_v2node=false
     if [[ -f /usr/local/V2bX/V2bX || -f /etc/systemd/system/V2bX.service || -f /etc/init.d/V2bX ]]; then
         has_v2bx=true
     fi
-    if [[ -f /usr/local/v2node/v2node || -f /etc/systemd/system/v2node.service || -f /etc/init.d/v2node ]]; then
-        has_v2node=true
-    fi
-    if [[ "$has_v2bx" == true && "$has_v2node" == true ]]; then
-        echo "both"
-    elif [[ "$has_v2bx" == true ]]; then
+    # [保留说明] v2node 检测逻辑已删除，如需恢复可在此处添加
+    
+    if [[ "$has_v2bx" == true ]]; then
         echo "v2bx"
-    elif [[ "$has_v2node" == true ]]; then
-        echo "v2node"
     else
         echo ""
     fi
@@ -721,10 +729,8 @@ uninstall_app_type() {
         uninstall_bin="/usr/bin/V2bX"
         uninstall_alias="/usr/bin/v2bx"
     else
-        uninstall_name="v2node"
-        uninstall_dir="/usr/local/v2node/"
-        uninstall_config="/etc/v2node/"
-        uninstall_bin="/usr/bin/v2node"
+        # 默认或未知类型暂不处理
+        return
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
@@ -749,28 +755,19 @@ uninstall_app_type() {
 handle_existing_installation() {
     local existing
     existing=$(detect_installed_app)
-    if [[ "$existing" == "v2node" && "$app_type" == "v2bx" ]]; then
-        echo -e "${yellow}检测到已安装 v2node，将自动卸载并安装 V2bX${plain}"
-        uninstall_app_type "v2node"
-    elif [[ "$existing" == "v2bx" && "$app_type" == "v2node" ]]; then
-        echo -e "${yellow}检测到已安装 V2bX，将自动卸载并安装 v2node${plain}"
-        uninstall_app_type "v2bx"
-    elif [[ "$existing" == "both" ]]; then
-        if [[ "$app_type" == "v2bx" ]]; then
-            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 V2bX 并卸载 v2node${plain}"
-            uninstall_app_type "v2node"
-        else
-            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 v2node 并卸载 V2bX${plain}"
-            uninstall_app_type "v2bx"
-        fi
+    
+    # [保留说明] 已移除 V2bX 与 v2node 互斥卸载的逻辑
+    # 目前仅保留 V2bX 自我检测，暂不需要额外操作
+    if [[ "$existing" == "v2bx" ]]; then
+        echo -e "${yellow}检测到已安装 V2bX${plain}"
     fi
 }
 
 install_base
-# 🚀 在基础依赖安装完成后，立即启用 BBR
+# 🚀 开启 BBR
 enable_bbr
 
-app_type="v2node"
+app_type="v2bx" # 默认改为 v2bx
 config_file_path=""
 version=""
 backend_url=""
@@ -795,6 +792,9 @@ trim_value() {
     echo "$v"
 }
 
+# ==========================================
+# 参数解析
+# ==========================================
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --type|-t)
@@ -888,8 +888,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 app_type=$(echo "$app_type" | tr '[:upper:]' '[:lower:]')
-if [[ "$app_type" != "v2node" && "$app_type" != "v2bx" ]]; then
-    echo -e "${red}不支持的类型: $app_type，请使用 v2node 或 v2bx${plain}"
+
+# [保留说明] 保留 case 结构以备将来扩展
+if [[ "$app_type" == "v2node" ]]; then
+    echo -e "${red}目前暂未实现 v2node 对接逻辑，请使用 v2bx${plain}"
+    exit 1
+elif [[ "$app_type" != "v2bx" ]]; then
+    echo -e "${red}不支持的类型: $app_type，仅支持 v2bx${plain}"
     exit 1
 fi
 
@@ -905,15 +910,10 @@ get_latest_version() {
     echo "$version"
 }
 
-if [[ "$app_type" == "v2node" ]]; then
-    app_name="v2node"
-    app_name_lower="v2node"
-    install_dir="/usr/local/v2node/"
-    config_dir="/etc/v2node/"
-    latest_version=$(get_latest_version "LiukerSun/v2node")
-    default_version="${latest_version:-v0.2.7}"
-    repo_base_url="${REPO_BASE_URL:-https://github.com/LiukerSun/v2node/releases/download}"
-elif [[ "$app_type" == "v2bx" ]]; then
+# ==========================================
+# 变量初始化 (仅保留 V2bX)
+# ==========================================
+if [[ "$app_type" == "v2bx" ]]; then
     app_name="V2bX"
     app_name_lower="V2bX"
     install_dir="/usr/local/V2bX/"
@@ -922,6 +922,8 @@ elif [[ "$app_type" == "v2bx" ]]; then
     default_version="${latest_version:-v0.4.1}"
     repo_base_url="${REPO_BASE_URL:-https://github.com/LiukerSun/v2bx/releases/download}"
 fi
+
+# [保留说明] 如果以后支持 v2node，在此处添加 elif [[ "$app_type" == "v2node" ]]; then ...
 
 if [[ -z "$version" ]]; then
     version="${default_version}"
