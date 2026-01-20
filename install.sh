@@ -165,23 +165,191 @@ validate_config() {
 auto_generate_config_v2node() {
     mkdir -p ${config_dir}
 
+    local safe_backend_url
+    local safe_backend_key
+    local safe_node_id
+    safe_backend_url=$(trim_value "$backend_url")
+    safe_backend_key=$(trim_value "$backend_key")
+    safe_node_id=$(trim_value "$node_id")
+
+    local core="xray"
+    local core_xray=false
+    local core_sing=false
+    local core_hysteria2=false
+    local core_type_value="${core_type:-xray}"
+    local transport_type_value="${transport_type:-tcp}"
+
+    core_type_value=$(echo "$core_type_value" | tr '[:upper:]' '[:lower:]')
+    transport_type_value=$(echo "$transport_type_value" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$core_type_value" == "xray" ]]; then
+        core="xray"
+        core_xray=true
+    elif [[ "$core_type_value" == "singbox" || "$core_type_value" == "sing" ]]; then
+        core="sing"
+        core_sing=true
+    elif [[ "$core_type_value" == "hysteria2" ]]; then
+        core="hysteria2"
+        core_hysteria2=true
+    fi
+
+    local node_type="$transport_type_value"
+    local cert_mode="none"
+    if [[ -n "$cert_domain" ]]; then
+        cert_mode="file"
+    fi
+
+    local ipv6_support=$(check_ipv6_support)
+    local listen_ip="0.0.0.0"
+    if [ "$ipv6_support" -eq 1 ]; then
+        listen_ip="::"
+    fi
+
+    local cores_config="["
+    if [ "$core_xray" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"xray\",
+        \"Log\": {
+            \"Level\": \"error\",
+            \"ErrorPath\": \"${config_dir}error.log\"
+        },
+        \"OutboundConfigPath\": \"${config_dir}custom_outbound.json\",
+        \"RouteConfigPath\": \"${config_dir}route.json\"
+    },"
+    fi
+    if [ "$core_sing" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"sing\",
+        \"Log\": {
+            \"Level\": \"error\",
+            \"Timestamp\": true
+        },
+        \"NTP\": {
+            \"Enable\": false,
+            \"Server\": \"time.apple.com\",
+            \"ServerPort\": 0
+        },
+        \"OriginalPath\": \"${config_dir}sing_origin.json\"
+    },"
+    fi
+    if [ "$core_hysteria2" = true ]; then
+        cores_config+="
+    {
+        \"Type\": \"hysteria2\",
+        \"Log\": {
+            \"Level\": \"error\"
+        }
+    },"
+    fi
+    cores_config+="]"
+    cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
+
+    local node_config=""
+    if [ "$core_type_value" == "xray" ]; then
+        node_config=$(cat <<EOF
+{
+            "Core": "$core",
+            "ApiHost": "$safe_backend_url",
+            "ApiKey": "$safe_backend_key",
+            "NodeID": $safe_node_id,
+            "NodeType": "$node_type",
+            "Timeout": 30,
+            "ListenIP": "$listen_ip",
+            "SendIP": "0.0.0.0",
+            "DeviceOnlineMinTraffic": 200,
+            "MinReportTraffic": 0,
+            "EnableProxyProtocol": false,
+            "EnableUot": true,
+            "EnableTFO": true,
+            "DNSType": "UseIPv4",
+            "CertConfig": {
+                "CertMode": "$cert_mode",
+                "RejectUnknownSni": false,
+                "CertDomain": "$cert_domain",
+                "CertFile": "${config_dir}fullchain.cer",
+                "KeyFile": "${config_dir}cert.key",
+                "Email": "v2bx@github.com",
+                "Provider": "cloudflare",
+                "DNSEnv": {
+                    "EnvName": "env1"
+                }
+            }
+        }
+EOF
+)
+    fi
+
     cat <<EOF > ${config_dir}config.json
 {
     "Log": {
-        "Level": "warning",
-        "Output": "",
-        "Access": "none"
+        "Level": "error",
+        "Output": ""
     },
-    "Nodes": [
+    "Cores": $cores_config,
+    "Nodes": [$node_config]
+}
+EOF
+
+    cat <<EOF > ${config_dir}custom_outbound.json
+[
+    {
+        "tag": "IPv4_out",
+        "protocol": "freedom",
+        "settings": {
+            "domainStrategy": "UseIPv4v6"
+        }
+    },
+    {
+        "tag": "IPv6_out",
+        "protocol": "freedom",
+        "settings": {
+            "domainStrategy": "UseIPv6"
+        }
+    },
+    {
+        "protocol": "blackhole",
+        "tag": "block"
+    }
+]
+EOF
+
+    cat <<EOF > ${config_dir}route.json
+{
+    "domainStrategy": "AsIs",
+    "rules": [
         {
-            "ApiHost": "$backend_url",
-            "NodeID": $node_id,
-            "ApiKey": "$backend_key",
-            "Timeout": 15
+            "outboundTag": "block",
+            "ip": [
+                "geoip:private"
+            ]
+        },
+        {
+            "outboundTag": "block",
+            "domain": [
+                "geosite:category-ads-all"
+            ]
+        },
+        {
+            "outboundTag": "IPv4_out",
+            "network": "udp,tcp"
         }
     ]
 }
 EOF
+
+    if [ "$core_sing" = true ]; then
+        if [[ ! -f ${config_dir}sing_origin.json ]]; then
+            cat <<EOF > ${config_dir}sing_origin.json
+{
+    "log": {
+        "level": "error"
+    }
+}
+EOF
+        fi
+    fi
 
     if [[ x"${release}" == x"alpine" ]]; then
         service ${app_name} restart
