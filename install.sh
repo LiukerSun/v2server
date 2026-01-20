@@ -132,12 +132,14 @@ parse_config_file() {
     backend_key=$(grep "backend_key:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
     node_id=$(grep "node_id:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
 
-    # V2bX 特有参数
-    if [[ "$app_type" == "v2bx" ]]; then
-        core_type=$(grep "core_type:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-        transport_type=$(grep "transport_type:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-        cert_domain=$(grep "cert_domain:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-    fi
+    core_type=$(grep "core_type:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    transport_type=$(grep "transport_type:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cert_domain=$(grep "cert_domain:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    acme_email=$(grep "acme_email:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cf_key=$(grep "cf_key:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cf_email=$(grep "cf_email:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cf_token=$(grep "cf_token:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cf_account_id=$(grep "cf_account_id:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
 
     if [[ -z "$backend_url" || -z "$backend_key" || -z "$node_id" ]]; then
         echo -e "${red}配置文件缺少必要信息 (backend_url, backend_key, node_id)${plain}"
@@ -705,8 +707,8 @@ EOF
     cd $cur_dir
 
     if [[ "$auto_config_enabled" == true ]]; then
+        issue_certificate
         if [[ "$app_type" == "v2bx" ]]; then
-            issue_certificate
             auto_generate_config_v2bx
         else
             auto_generate_config_v2node
@@ -963,13 +965,22 @@ if [[ "$version" != v* ]]; then
     version="v$version"
 fi
 
-repo_base_url=$(trim_value "$repo_base_url")
-backend_url=$(trim_value "$backend_url")
-cert_domain=$(trim_value "$cert_domain")
-
 if [[ -n "$config_file_path" ]]; then
     parse_config_file "$config_file_path"
 fi
+
+repo_base_url=$(trim_value "$repo_base_url")
+backend_url=$(trim_value "$backend_url")
+backend_key=$(trim_value "$backend_key")
+node_id=$(trim_value "$node_id")
+core_type=$(trim_value "$core_type")
+transport_type=$(trim_value "$transport_type")
+cert_domain=$(trim_value "$cert_domain")
+acme_email=$(trim_value "$acme_email")
+cf_key=$(trim_value "$cf_key")
+cf_email=$(trim_value "$cf_email")
+cf_token=$(trim_value "$cf_token")
+cf_account_id=$(trim_value "$cf_account_id")
 
 if [[ "$auto_config_enabled" == true ]]; then
     validate_config
