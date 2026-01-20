@@ -1,4 +1,4 @@
-#!/bin/bash
+ #!/bin/bash
 
 red='\033[0;31m'
 green='\033[0;32m'
@@ -714,6 +714,88 @@ EOF
     fi
 }
 
+detect_installed_app() {
+    local has_v2bx=false
+    local has_v2node=false
+
+    if [[ -f /usr/local/V2bX/V2bX || -f /etc/systemd/system/V2bX.service || -f /etc/init.d/V2bX ]]; then
+        has_v2bx=true
+    fi
+    if [[ -f /usr/local/v2node/v2node || -f /etc/systemd/system/v2node.service || -f /etc/init.d/v2node ]]; then
+        has_v2node=true
+    fi
+
+    if [[ "$has_v2bx" == true && "$has_v2node" == true ]]; then
+        echo "both"
+    elif [[ "$has_v2bx" == true ]]; then
+        echo "v2bx"
+    elif [[ "$has_v2node" == true ]]; then
+        echo "v2node"
+    else
+        echo ""
+    fi
+}
+
+uninstall_app_type() {
+    local target="$1"
+    local uninstall_name=""
+    local uninstall_dir=""
+    local uninstall_config=""
+    local uninstall_bin=""
+    local uninstall_alias=""
+
+    if [[ "$target" == "v2bx" ]]; then
+        uninstall_name="V2bX"
+        uninstall_dir="/usr/local/V2bX/"
+        uninstall_config="/etc/V2bX/"
+        uninstall_bin="/usr/bin/V2bX"
+        uninstall_alias="/usr/bin/v2bx"
+    else
+        uninstall_name="v2node"
+        uninstall_dir="/usr/local/v2node/"
+        uninstall_config="/etc/v2node/"
+        uninstall_bin="/usr/bin/v2node"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop ${uninstall_name} >/dev/null 2>&1
+        systemctl disable ${uninstall_name} >/dev/null 2>&1
+        rm -f /etc/systemd/system/${uninstall_name}.service
+        systemctl daemon-reload >/dev/null 2>&1
+    else
+        service ${uninstall_name} stop >/dev/null 2>&1
+        rc-update del ${uninstall_name} default >/dev/null 2>&1
+        rm -f /etc/init.d/${uninstall_name}
+    fi
+
+    rm -rf ${uninstall_dir}
+    rm -rf ${uninstall_config}
+    rm -f ${uninstall_bin}
+    if [[ -n "$uninstall_alias" ]]; then
+        rm -f ${uninstall_alias}
+    fi
+}
+
+handle_existing_installation() {
+    local existing
+    existing=$(detect_installed_app)
+    if [[ "$existing" == "v2node" && "$app_type" == "v2bx" ]]; then
+        echo -e "${yellow}检测到已安装 v2node，将自动卸载并安装 V2bX${plain}"
+        uninstall_app_type "v2node"
+    elif [[ "$existing" == "v2bx" && "$app_type" == "v2node" ]]; then
+        echo -e "${yellow}检测到已安装 V2bX，将自动卸载并安装 v2node${plain}"
+        uninstall_app_type "v2bx"
+    elif [[ "$existing" == "both" ]]; then
+        if [[ "$app_type" == "v2bx" ]]; then
+            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 V2bX 并卸载 v2node${plain}"
+            uninstall_app_type "v2node"
+        else
+            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 v2node 并卸载 V2bX${plain}"
+            uninstall_app_type "v2bx"
+        fi
+    fi
+}
+
 install_base
 
 # 默认参数
@@ -840,6 +922,8 @@ if [[ "$app_type" != "v2node" && "$app_type" != "v2bx" ]]; then
     echo -e "${red}不支持的类型: $app_type，请使用 v2node 或 v2bx${plain}"
     exit 1
 fi
+
+handle_existing_installation
 
 # 获取最新版本
 get_latest_version() {
