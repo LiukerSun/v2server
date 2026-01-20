@@ -139,141 +139,161 @@ parse_config_file() {
     cf_email=$(grep "cf_email:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
     cf_token=$(grep "cf_token:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
     cf_account_id=$(grep "cf_account_id:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-
-    if [[ -z "$backend_url" || -z "$backend_key" || -z "$node_id" ]]; then
-        echo -e "${red}配置文件缺少必要信息 (backend_url, backend_key, node_id)${plain}"
-        exit 1
-    fi
 }
 
 validate_config() {
     if [[ -z "$backend_url" || -z "$backend_key" || -z "$node_id" ]]; then
-        echo -e "${red}缺少必要配置参数${plain}"
+        echo -e "${red}配置文件缺少必要信息 (backend_url, backend_key, node_id)${plain}"
         exit 1
     fi
-
-    if [[ -z "$core_type" || -z "$transport_type" ]]; then
-        echo -e "${red}需要指定 core_type 和 transport_type${plain}"
-        exit 1
+    # 只有 v2bx 需要 core_type 和 transport_type
+    if [[ "$app_type" == "v2bx" ]]; then
+        if [[ -z "$core_type" || -z "$transport_type" ]]; then
+            echo -e "${red}V2bX 需要指定 core_type 和 transport_type${plain}"
+            exit 1
+        fi
     fi
 }
 
 auto_generate_config() {
-    # 重新生成配置时，先停止服务以防万一
+    # 停止服务
     if [[ x"${release}" == x"alpine" ]]; then
         service ${app_name} stop >/dev/null 2>&1
     else
         systemctl stop ${app_name} >/dev/null 2>&1
     fi
 
-    local core="xray"
-    local core_xray=false
-    local core_sing=false
-    local core_hysteria2=false
-
-    core_type=$(echo "$core_type" | tr '[:upper:]' '[:lower:]')
-    transport_type=$(echo "$transport_type" | tr '[:upper:]' '[:lower:]')
-
-    if [[ "$core_type" == "xray" ]]; then
-        core="xray"
-        core_xray=true
-    elif [[ "$core_type" == "singbox" || "$core_type" == "sing" ]]; then
-        core="sing"
-        core_sing=true
-    elif [[ "$core_type" == "hysteria2" ]]; then
-        core="hysteria2"
-        core_hysteria2=true
-    fi
-
-    local node_type="$transport_type"
-    local cert_mode="none"
-    if [[ -n "$cert_domain" ]]; then
-        cert_mode="file"
-    fi
-
-    local ipv6_support=$(check_ipv6_support)
-    local listen_ip="0.0.0.0"
-    if [ "$ipv6_support" -eq 1 ]; then
-        listen_ip="::"
-    fi
-
-    local cores_config="["
-    if [ "$core_xray" = true ]; then
-        cores_config+="
-    {
-        \"Type\": \"xray\",
-        \"Log\": {
-            \"Level\": \"error\",
-            \"ErrorPath\": \"${config_dir}error.log\"
-        },
-        \"OutboundConfigPath\": \"${config_dir}custom_outbound.json\",
-        \"RouteConfigPath\": \"${config_dir}route.json\"
-    },"
-    fi
-    if [ "$core_sing" = true ]; then
-        cores_config+="
-    {
-        \"Type\": \"sing\",
-        \"Log\": {
-            \"Level\": \"error\",
-            \"Timestamp\": true
-        },
-        \"NTP\": {
-            \"Enable\": false,
-            \"Server\": \"time.apple.com\",
-            \"ServerPort\": 0
-        },
-        \"OriginalPath\": \"${config_dir}sing_origin.json\"
-    },"
-    fi
-    if [ "$core_hysteria2" = true ]; then
-        cores_config+="
-    {
-        \"Type\": \"hysteria2\",
-        \"Log\": {
-            \"Level\": \"error\"
-        }
-    },"
-    fi
-    cores_config+="]"
-    cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
-
-    local node_config=""
-    if [ "$core_type" == "xray" ]; then
-        node_config=$(cat <<EOF
+    if [[ "$app_type" == "v2node" ]]; then
+        # ================= v2node 专用配置结构 =================
+        echo -e "${green}生成 v2node 配置文件...${plain}"
+        cat <<EOF > ${config_dir}config.json
 {
-            "Core": "$core",
+    "Log": {
+        "Level": "warning",
+        "Output": "",
+        "Access": "none"
+    },
+    "Nodes": [
+        {
             "ApiHost": "$backend_url",
-            "ApiKey": "$backend_key",
             "NodeID": $node_id,
-            "NodeType": "$node_type",
-            "Timeout": 30,
-            "ListenIP": "$listen_ip",
-            "SendIP": "0.0.0.0",
-            "DeviceOnlineMinTraffic": 200,
-            "MinReportTraffic": 0,
-            "EnableProxyProtocol": false,
-            "EnableUot": true,
-            "EnableTFO": true,
-            "DNSType": "UseIPv4",
-            "CertConfig": {
-                "CertMode": "$cert_mode",
-                "RejectUnknownSni": false,
-                "CertDomain": "$cert_domain",
-                "CertFile": "${config_dir}fullchain.cer",
-                "KeyFile": "${config_dir}cert.key",
-                "Email": "${app_name_lower}@github.com",
-                "Provider": "cloudflare",
-                "DNSEnv": {
-                    "EnvName": "env1"
+            "ApiKey": "$backend_key",
+            "Timeout": 15
+        }
+    ]
+}
+EOF
+    else
+        # ================= V2bX 完整配置结构 =================
+        echo -e "${green}生成 V2bX 配置文件...${plain}"
+        local core="xray"
+        local core_xray=false
+        local core_sing=false
+        local core_hysteria2=false
+
+        core_type=$(echo "$core_type" | tr '[:upper:]' '[:lower:]')
+        transport_type=$(echo "$transport_type" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$core_type" == "xray" ]]; then
+            core="xray"
+            core_xray=true
+        elif [[ "$core_type" == "singbox" || "$core_type" == "sing" ]]; then
+            core="sing"
+            core_sing=true
+        elif [[ "$core_type" == "hysteria2" ]]; then
+            core="hysteria2"
+            core_hysteria2=true
+        fi
+
+        local node_type="$transport_type"
+        local cert_mode="none"
+        if [[ -n "$cert_domain" ]]; then
+            cert_mode="file"
+        fi
+
+        local ipv6_support=$(check_ipv6_support)
+        local listen_ip="0.0.0.0"
+        if [ "$ipv6_support" -eq 1 ]; then
+            listen_ip="::"
+        fi
+
+        local cores_config="["
+        if [ "$core_xray" = true ]; then
+            cores_config+="
+        {
+            \"Type\": \"xray\",
+            \"Log\": {
+                \"Level\": \"error\",
+                \"ErrorPath\": \"${config_dir}error.log\"
+            },
+            \"OutboundConfigPath\": \"${config_dir}custom_outbound.json\",
+            \"RouteConfigPath\": \"${config_dir}route.json\"
+        },"
+        fi
+        if [ "$core_sing" = true ]; then
+            cores_config+="
+        {
+            \"Type\": \"sing\",
+            \"Log\": {
+                \"Level\": \"error\",
+                \"Timestamp\": true
+            },
+            \"NTP\": {
+                \"Enable\": false,
+                \"Server\": \"time.apple.com\",
+                \"ServerPort\": 0
+            },
+            \"OriginalPath\": \"${config_dir}sing_origin.json\"
+        },"
+        fi
+        if [ "$core_hysteria2" = true ]; then
+            cores_config+="
+        {
+            \"Type\": \"hysteria2\",
+            \"Log\": {
+                \"Level\": \"error\"
+            }
+        },"
+        fi
+        cores_config+="]"
+        cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
+
+        local node_config=""
+        if [ "$core_type" == "xray" ]; then
+            node_config=$(cat <<EOF
+{
+                "Core": "$core",
+                "ApiHost": "$backend_url",
+                "ApiKey": "$backend_key",
+                "NodeID": $node_id,
+                "NodeType": "$node_type",
+                "Timeout": 30,
+                "ListenIP": "$listen_ip",
+                "SendIP": "0.0.0.0",
+                "DeviceOnlineMinTraffic": 200,
+                "MinReportTraffic": 0,
+                "EnableProxyProtocol": false,
+                "EnableUot": true,
+                "EnableTFO": true,
+                "DNSType": "UseIPv4",
+                "CertConfig": {
+                    "CertMode": "$cert_mode",
+                    "RejectUnknownSni": false,
+                    "CertDomain": "$cert_domain",
+                    "CertFile": "${config_dir}fullchain.cer",
+                    "KeyFile": "${config_dir}cert.key",
+                    "Email": "${app_name_lower}@github.com",
+                    "Provider": "cloudflare",
+                    "DNSEnv": {
+                        "EnvName": "env1"
+                    }
                 }
             }
-        }
 EOF
 )
-    fi
+        fi
 
-    cat <<EOF > ${config_dir}config.json
+        cat <<EOF > ${config_dir}config.json
 {
     "Log": {
         "Level": "error",
@@ -284,7 +304,7 @@ EOF
 }
 EOF
 
-    cat <<EOF > ${config_dir}custom_outbound.json
+        cat <<EOF > ${config_dir}custom_outbound.json
 [
     {
         "tag": "IPv4_out",
@@ -307,7 +327,7 @@ EOF
 ]
 EOF
 
-    cat <<EOF > ${config_dir}route.json
+        cat <<EOF > ${config_dir}route.json
 {
     "domainStrategy": "AsIs",
     "rules": [
@@ -331,17 +351,19 @@ EOF
 }
 EOF
 
-    if [ "$core_sing" = true ]; then
-        if [[ ! -f ${config_dir}sing_origin.json ]]; then
-            cat <<EOF > ${config_dir}sing_origin.json
+        if [ "$core_sing" = true ]; then
+            if [[ ! -f ${config_dir}sing_origin.json ]]; then
+                cat <<EOF > ${config_dir}sing_origin.json
 {
     "log": {
         "level": "error"
     }
 }
 EOF
+            fi
         fi
-    fi
+    fi 
+    # ^^^ 结束 if app_type == v2node 的 else 块 ^^^
 
     if [[ x"${release}" == x"alpine" ]]; then
         service ${app_name} restart
@@ -378,13 +400,6 @@ configure_acme_account() {
     local cf_email_sanitized="${cf_email_value//\'/}"
     local default_acme_server="https://acme-v02.api.letsencrypt.org/directory"
     cat <<EOF > "$acme_account_conf"
-#LOG_FILE="/root/.acme.sh/acme.sh.log"
-#LOG_LEVEL=1
-
-#AUTO_UPGRADE="1"
-
-#NO_TIMESTAMP=1
-
 UPGRADE_HASH='1bd2922bc37cddba97765af2ae12ad5441c91a74'
 ACCOUNT_EMAIL='${acme_email_sanitized}'
 SAVED_CF_Key='${cf_key_sanitized}'
@@ -398,9 +413,7 @@ issue_certificate() {
     if [[ -z "$cert_domain" ]]; then
         return 0
     fi
-    # 确保配置目录存在
     mkdir -p ${config_dir}
-    
     if [[ -z "$acme_email" ]]; then
         acme_email="${ACME_EMAIL}"
     fi
@@ -423,7 +436,6 @@ issue_certificate() {
     if [[ -z "$cf_email" ]]; then
         cf_email="${CF_Email}"
     fi
-    # 尝试从现有配置读取
     if [[ -z "$cf_key" || -z "$cf_email" ]]; then
         local acme_account_conf="/root/.acme.sh/account.conf"
         if [[ -f "$acme_account_conf" ]]; then
@@ -456,7 +468,6 @@ issue_certificate() {
 }
 
 install_app() {
-    # 1. 检查是否已安装，如果是则跳过下载，但不会阻断脚本后续执行
     if [[ -f ${install_dir}${app_name} && "$force_reinstall" != true ]]; then
         echo -e "${yellow}检测到 ${app_name} 已安装，跳过下载步骤...${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
@@ -467,11 +478,9 @@ install_app() {
         return 0 
     fi
 
-    # 2. 如果未安装或强制重装，则执行下载流程
     if [[ -e ${install_dir} ]]; then
         rm -rf ${install_dir}
     fi
-
     mkdir ${install_dir} -p
     cd ${install_dir}
 
@@ -517,24 +526,19 @@ install_app() {
         rm /etc/init.d/${app_name} -f
         cat <<EOF > /etc/init.d/${app_name}
 #!/sbin/openrc-run
-
 name="${app_name}"
 description="${app_name}"
-
 command="${install_dir}${app_name}"
 command_args="server"
 command_user="root"
-
 pidfile="/run/${app_name}.pid"
 command_background="yes"
-
 depend() {
         need net
 }
 EOF
         chmod +x /etc/init.d/${app_name}
         rc-update add ${app_name} default
-        :
     else
         rm /etc/systemd/system/${app_name}.service -f
         cat <<EOF > /etc/systemd/system/${app_name}.service
@@ -542,7 +546,6 @@ EOF
 Description=${app_name} Service
 After=network.target nss-lookup.target
 Wants=network.target
-
 [Service]
 User=root
 Group=root
@@ -555,44 +558,12 @@ WorkingDirectory=${install_dir}
 ExecStart=${install_dir}${app_name} server
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl stop ${app_name}
         systemctl enable ${app_name}
-        :
-    fi
-
-    if [[ ! -f ${config_dir}config.json ]]; then
-        cp config.json ${config_dir}
-        first_install=true
-    else
-        if [[ x"${release}" == x"alpine" ]]; then
-            service ${app_name} start
-        else
-            systemctl start ${app_name}
-        fi
-        sleep 2
-        check_status
-        if [[ $? != 0 ]]; then
-            echo -e "${red}${app_name} 可能启动失败，请稍后使用 ${app_name_lower} log 查看日志信息${plain}"
-        fi
-        first_install=false
-    fi
-
-    if [[ ! -f ${config_dir}dns.json ]]; then
-        cp dns.json ${config_dir}
-    fi
-    if [[ ! -f ${config_dir}route.json ]]; then
-        cp route.json ${config_dir}
-    fi
-    if [[ ! -f ${config_dir}custom_outbound.json ]]; then
-        cp custom_outbound.json ${config_dir}
-    fi
-    if [[ ! -f ${config_dir}custom_inbound.json ]]; then
-        cp custom_inbound.json ${config_dir}
     fi
 
     cat <<EOF > /usr/bin/${app_name_lower}
@@ -618,18 +589,10 @@ else
     svc_disable="rc-update del ${app_name} default"
 fi
 case "\$cmd" in
-    start)
-        \$svc_start
-        ;;
-    stop)
-        \$svc_stop
-        ;;
-    restart)
-        \$svc_restart
-        ;;
-    status)
-        \$svc_status
-        ;;
+    start) \$svc_start ;;
+    stop) \$svc_stop ;;
+    restart) \$svc_restart ;;
+    status) \$svc_status ;;
     log|logs)
         if command -v journalctl >/dev/null 2>&1; then
             journalctl -u ${app_name} -e --no-pager
@@ -640,12 +603,8 @@ case "\$cmd" in
             exit 1
         fi
         ;;
-    enable)
-        \$svc_enable
-        ;;
-    disable)
-        \$svc_disable
-        ;;
+    enable) \$svc_enable ;;
+    disable) \$svc_disable ;;
     config)
         if [[ -f ${config_dir}config.json ]]; then
             cat ${config_dir}config.json
@@ -670,7 +629,6 @@ esac
 EOF
     chmod +x /usr/bin/${app_name_lower}
 
-    # 创建别名
     if [[ "$app_type" == "v2bx" ]] && [ ! -L /usr/bin/v2bx ]; then
         ln -s /usr/bin/${app_name_lower} /usr/bin/v2bx
         chmod +x /usr/bin/v2bx
@@ -682,14 +640,12 @@ EOF
 detect_installed_app() {
     local has_v2bx=false
     local has_v2node=false
-
     if [[ -f /usr/local/V2bX/V2bX || -f /etc/systemd/system/V2bX.service || -f /etc/init.d/V2bX ]]; then
         has_v2bx=true
     fi
     if [[ -f /usr/local/v2node/v2node || -f /etc/systemd/system/v2node.service || -f /etc/init.d/v2node ]]; then
         has_v2node=true
     fi
-
     if [[ "$has_v2bx" == true && "$has_v2node" == true ]]; then
         echo "both"
     elif [[ "$has_v2bx" == true ]]; then
@@ -763,7 +719,6 @@ handle_existing_installation() {
 
 install_base
 
-# 默认参数
 app_type="v2node"
 config_file_path=""
 version=""
@@ -881,7 +836,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 规范化类型
 app_type=$(echo "$app_type" | tr '[:upper:]' '[:lower:]')
 if [[ "$app_type" != "v2node" && "$app_type" != "v2bx" ]]; then
     echo -e "${red}不支持的类型: $app_type，请使用 v2node 或 v2bx${plain}"
@@ -890,7 +844,6 @@ fi
 
 handle_existing_installation
 
-# 获取最新版本
 get_latest_version() {
     local repo=$1
     local version=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -901,7 +854,6 @@ get_latest_version() {
     echo "$version"
 }
 
-# 根据类型设置变量
 if [[ "$app_type" == "v2node" ]]; then
     app_name="v2node"
     app_name_lower="v2node"
@@ -920,7 +872,6 @@ elif [[ "$app_type" == "v2bx" ]]; then
     repo_base_url="${REPO_BASE_URL:-https://github.com/LiukerSun/v2bx/releases/download}"
 fi
 
-# 设置版本
 if [[ -z "$version" ]]; then
     version="${default_version}"
 fi
@@ -952,7 +903,6 @@ fi
 echo -e "${green}正在安装/更新 ${app_name} ${version}...${plain}"
 install_app "$version"
 
-# 🚀 配置和证书更新逻辑（放在最后，确保每次运行都会执行）
 if [[ "$auto_config_enabled" == true ]]; then
     echo -e "${green}正在检查/申请 SSL 证书...${plain}"
     issue_certificate
