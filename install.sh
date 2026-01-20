@@ -10,11 +10,67 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
-# ... (中间的系统检测代码保持不变，省略以节省篇幅，请保留原有的检测逻辑) ...
-# ... 从这里开始往下是修改的重点 ...
+if [[ -f /etc/redhat-release ]]; then
+    release="centos"
+elif cat /etc/issue | grep -Eqi "alpine"; then
+    release="alpine"
+elif cat /etc/issue | grep -Eqi "debian"; then
+    release="debian"
+elif cat /etc/issue | grep -Eqi "ubuntu"; then
+    release="ubuntu"
+elif cat /etc/issue | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
+    release="centos"
+elif cat /proc/version | grep -Eqi "debian"; then
+    release="debian"
+elif cat /proc/version | grep -Eqi "ubuntu"; then
+    release="ubuntu"
+elif cat /proc/version | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
+    release="centos"
+elif cat /proc/version | grep -Eqi "arch"; then
+    release="arch"
+else
+    echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
+fi
+
+arch=$(uname -m)
+
+if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
+    arch="64"
+elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
+    arch="arm64-v8a"
+elif [[ $arch == "s390x" ]]; then
+    arch="s390x"
+else
+    arch="64"
+fi
+
+if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ] ; then
+    echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
+    exit 2
+fi
+
+if [[ -f /etc/os-release ]]; then
+    os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
+fi
+if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
+    os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
+fi
+
+if [[ x"${release}" == x"centos" ]]; then
+    if [[ ${os_version} -le 6 ]]; then
+        echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
+    fi
+elif [[ x"${release}" == x"ubuntu" ]]; then
+    if [[ ${os_version} -lt 16 ]]; then
+        echo -e "${red}请使用 Ubuntu 16 或更高版本的系统！${plain}\n" && exit 1
+    fi
+elif [[ x"${release}" == x"debian" ]]; then
+    if [[ ${os_version} -lt 8 ]]; then
+        echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
+    fi
+fi
 
 install_base() {
-    # ... (保持原有的 install_base 逻辑) ...
     if [[ x"${release}" == x"centos" ]]; then
         yum install epel-release wget curl unzip tar crontabs socat ca-certificates -y >/dev/null 2>&1
         update-ca-trust force-enable >/dev/null 2>&1
@@ -58,7 +114,6 @@ check_status() {
     fi
 }
 
-# ... (保持 check_ipv6_support, parse_config_file, validate_config 不变) ...
 check_ipv6_support() {
     if ip -6 addr | grep -q "inet6"; then
         echo "1"
@@ -82,9 +137,11 @@ parse_config_file() {
     acme_email=$(grep "acme_email:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
     cf_key=$(grep "cf_key:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
     cf_email=$(grep "cf_email:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
-    
+    cf_token=$(grep "cf_token:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+    cf_account_id=$(grep "cf_account_id:" "$file" | head -1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+
     if [[ -z "$backend_url" || -z "$backend_key" || -z "$node_id" ]]; then
-        echo -e "${red}配置文件缺少必要信息${plain}"
+        echo -e "${red}配置文件缺少必要信息 (backend_url, backend_key, node_id)${plain}"
         exit 1
     fi
 }
@@ -94,6 +151,7 @@ validate_config() {
         echo -e "${red}缺少必要配置参数${plain}"
         exit 1
     fi
+
     if [[ -z "$core_type" || -z "$transport_type" ]]; then
         echo -e "${red}需要指定 core_type 和 transport_type${plain}"
         exit 1
@@ -139,7 +197,6 @@ auto_generate_config() {
         listen_ip="::"
     fi
 
-    # ... (保持原有的 cores_config 生成逻辑) ...
     local cores_config="["
     if [ "$core_xray" = true ]; then
         cores_config+="
@@ -216,7 +273,6 @@ EOF
 )
     fi
 
-    # 写入主配置文件
     cat <<EOF > ${config_dir}config.json
 {
     "Log": {
@@ -228,7 +284,6 @@ EOF
 }
 EOF
 
-    # ... (保持 custom_outbound, route, sing_origin 文件的生成逻辑) ...
     cat <<EOF > ${config_dir}custom_outbound.json
 [
     {
@@ -288,7 +343,6 @@ EOF
         fi
     fi
 
-    # 重启服务
     if [[ x"${release}" == x"alpine" ]]; then
         service ${app_name} restart
     else
@@ -302,15 +356,19 @@ EOF
 }
 
 configure_acme_account() {
-    # ... (保持原逻辑) ...
     local acme_account_conf="/root/.acme.sh/account.conf"
     mkdir -p /root/.acme.sh
-    if [[ -z "$acme_email" ]]; then acme_email="${ACME_EMAIL}"; fi
+    if [[ -z "$acme_email" ]]; then
+        acme_email="${ACME_EMAIL}"
+    fi
     local cf_key_value="$cf_key"
     local cf_email_value="$cf_email"
-    if [[ -z "$cf_key_value" ]]; then cf_key_value="${CF_Key}"; fi
-    if [[ -z "$cf_email_value" ]]; then cf_email_value="${CF_Email}"; fi
-    
+    if [[ -z "$cf_key_value" ]]; then
+        cf_key_value="${CF_Key}"
+    fi
+    if [[ -z "$cf_email_value" ]]; then
+        cf_email_value="${CF_Email}"
+    fi
     if [[ -z "$acme_email" || -z "$cf_key_value" || -z "$cf_email_value" ]]; then
         echo -e "${red}缺少 ACME 邮箱或 Cloudflare 凭证${plain}"
         exit 1
@@ -320,6 +378,13 @@ configure_acme_account() {
     local cf_email_sanitized="${cf_email_value//\'/}"
     local default_acme_server="https://acme-v02.api.letsencrypt.org/directory"
     cat <<EOF > "$acme_account_conf"
+#LOG_FILE="/root/.acme.sh/acme.sh.log"
+#LOG_LEVEL=1
+
+#AUTO_UPGRADE="1"
+
+#NO_TIMESTAMP=1
+
 UPGRADE_HASH='1bd2922bc37cddba97765af2ae12ad5441c91a74'
 ACCOUNT_EMAIL='${acme_email_sanitized}'
 SAVED_CF_Key='${cf_key_sanitized}'
@@ -335,10 +400,11 @@ issue_certificate() {
     fi
     # 确保配置目录存在
     mkdir -p ${config_dir}
-
-    if [[ -z "$acme_email" ]]; then acme_email="${ACME_EMAIL}"; fi
-    local acme_sh="/root/.acme.sh/acme.sh"
     
+    if [[ -z "$acme_email" ]]; then
+        acme_email="${ACME_EMAIL}"
+    fi
+    local acme_sh="/root/.acme.sh/acme.sh"
     if [[ ! -f "$acme_sh" ]]; then
         if [[ -z "$acme_email" ]]; then
             echo -e "${red}缺少 ACME 邮箱，请使用 --acme-email 或设置 ACME_EMAIL${plain}"
@@ -350,21 +416,25 @@ issue_certificate() {
         echo -e "${red}acme.sh 安装失败${plain}"
         exit 1
     fi
-    
     configure_acme_account
-    
-    if [[ -z "$cf_key" ]]; then cf_key="${CF_Key}"; fi
-    if [[ -z "$cf_email" ]]; then cf_email="${CF_Email}"; fi
-    
-    # 尝试从现有文件读取
+    if [[ -z "$cf_key" ]]; then
+        cf_key="${CF_Key}"
+    fi
+    if [[ -z "$cf_email" ]]; then
+        cf_email="${CF_Email}"
+    fi
+    # 尝试从现有配置读取
     if [[ -z "$cf_key" || -z "$cf_email" ]]; then
         local acme_account_conf="/root/.acme.sh/account.conf"
         if [[ -f "$acme_account_conf" ]]; then
-            if [[ -z "$cf_key" ]]; then cf_key=$(grep -E "^SAVED_CF_Key=" "$acme_account_conf" | head -1 | cut -d"'" -f2); fi
-            if [[ -z "$cf_email" ]]; then cf_email=$(grep -E "^SAVED_CF_Email=" "$acme_account_conf" | head -1 | cut -d"'" -f2); fi
+            if [[ -z "$cf_key" ]]; then
+                cf_key=$(grep -E "^SAVED_CF_Key=" "$acme_account_conf" | head -1 | cut -d"'" -f2)
+            fi
+            if [[ -z "$cf_email" ]]; then
+                cf_email=$(grep -E "^SAVED_CF_Email=" "$acme_account_conf" | head -1 | cut -d"'" -f2)
+            fi
         fi
     fi
-    
     if [[ -z "$cf_key" || -z "$cf_email" ]]; then
         echo -e "${red}缺少 Cloudflare DNS 凭证 (CF_Key/CF_Email)${plain}"
         exit 1
@@ -374,12 +444,10 @@ issue_certificate() {
     
     echo -e "${green}开始为域名 ${cert_domain} 申请/续期证书...${plain}"
     "$acme_sh" --issue -d "$cert_domain" --dns dns_cf
-    # 注意：acme.sh 如果证书未过期且域名未变，会提示 Skipped，返回值通常也是 0 或 2，不一定是错误
     
     local cert_source_dir="/root/.acme.sh/${cert_domain}_ecc"
     if [[ ! -f "${cert_source_dir}/fullchain.cer" || ! -f "${cert_source_dir}/${cert_domain}.key" ]]; then
         echo -e "${red}证书文件未生成，可能是申请失败，详情请看上方日志${plain}"
-        # 这里不强制 exit，允许用户手动排查
     else
         echo -e "${green}证书申请/检查成功，正在部署到 ${config_dir}${plain}"
         cp -f "${cert_source_dir}/fullchain.cer" ${config_dir}fullchain.cer
@@ -403,6 +471,7 @@ install_app() {
     if [[ -e ${install_dir} ]]; then
         rm -rf ${install_dir}
     fi
+
     mkdir ${install_dir} -p
     cd ${install_dir}
 
@@ -422,7 +491,6 @@ install_app() {
 
     curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o ${install_dir}${app_name_lower}-linux.zip "$remote_zip" >/dev/null 2>&1
     if [[ $? != 0 ]]; then
-        # 尝试去掉 'v' 前缀再次下载
         if [[ "$last_version" == v* ]]; then
             local alt_version="${last_version#v}"
             if [[ "$repo_base_url" == *"/releases/download" ]]; then
@@ -445,24 +513,28 @@ install_app() {
     cp geoip.dat ${config_dir}
     cp geosite.dat ${config_dir}
 
-    # ... (服务文件创建逻辑保持不变) ...
     if [[ x"${release}" == x"alpine" ]]; then
         rm /etc/init.d/${app_name} -f
         cat <<EOF > /etc/init.d/${app_name}
 #!/sbin/openrc-run
+
 name="${app_name}"
 description="${app_name}"
+
 command="${install_dir}${app_name}"
 command_args="server"
 command_user="root"
+
 pidfile="/run/${app_name}.pid"
 command_background="yes"
+
 depend() {
         need net
 }
 EOF
         chmod +x /etc/init.d/${app_name}
         rc-update add ${app_name} default
+        :
     else
         rm /etc/systemd/system/${app_name}.service -f
         cat <<EOF > /etc/systemd/system/${app_name}.service
@@ -470,6 +542,7 @@ EOF
 Description=${app_name} Service
 After=network.target nss-lookup.target
 Wants=network.target
+
 [Service]
 User=root
 Group=root
@@ -482,15 +555,46 @@ WorkingDirectory=${install_dir}
 ExecStart=${install_dir}${app_name} server
 Restart=always
 RestartSec=10
+
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl stop ${app_name}
         systemctl enable ${app_name}
+        :
     fi
 
-    # ... (CLI 工具创建逻辑保持不变) ...
+    if [[ ! -f ${config_dir}config.json ]]; then
+        cp config.json ${config_dir}
+        first_install=true
+    else
+        if [[ x"${release}" == x"alpine" ]]; then
+            service ${app_name} start
+        else
+            systemctl start ${app_name}
+        fi
+        sleep 2
+        check_status
+        if [[ $? != 0 ]]; then
+            echo -e "${red}${app_name} 可能启动失败，请稍后使用 ${app_name_lower} log 查看日志信息${plain}"
+        fi
+        first_install=false
+    fi
+
+    if [[ ! -f ${config_dir}dns.json ]]; then
+        cp dns.json ${config_dir}
+    fi
+    if [[ ! -f ${config_dir}route.json ]]; then
+        cp route.json ${config_dir}
+    fi
+    if [[ ! -f ${config_dir}custom_outbound.json ]]; then
+        cp custom_outbound.json ${config_dir}
+    fi
+    if [[ ! -f ${config_dir}custom_inbound.json ]]; then
+        cp custom_inbound.json ${config_dir}
+    fi
+
     cat <<EOF > /usr/bin/${app_name_lower}
 #!/bin/bash
 cmd="\$1"
@@ -514,10 +618,18 @@ else
     svc_disable="rc-update del ${app_name} default"
 fi
 case "\$cmd" in
-    start) \$svc_start ;;
-    stop) \$svc_stop ;;
-    restart) \$svc_restart ;;
-    status) \$svc_status ;;
+    start)
+        \$svc_start
+        ;;
+    stop)
+        \$svc_stop
+        ;;
+    restart)
+        \$svc_restart
+        ;;
+    status)
+        \$svc_status
+        ;;
     log|logs)
         if command -v journalctl >/dev/null 2>&1; then
             journalctl -u ${app_name} -e --no-pager
@@ -528,8 +640,12 @@ case "\$cmd" in
             exit 1
         fi
         ;;
-    enable) \$svc_enable ;;
-    disable) \$svc_disable ;;
+    enable)
+        \$svc_enable
+        ;;
+    disable)
+        \$svc_disable
+        ;;
     config)
         if [[ -f ${config_dir}config.json ]]; then
             cat ${config_dir}config.json
@@ -554,29 +670,280 @@ esac
 EOF
     chmod +x /usr/bin/${app_name_lower}
 
+    # 创建别名
     if [[ "$app_type" == "v2bx" ]] && [ ! -L /usr/bin/v2bx ]; then
         ln -s /usr/bin/${app_name_lower} /usr/bin/v2bx
         chmod +x /usr/bin/v2bx
     fi
 
     cd $cur_dir
-    # 注意：这里不再调用 issue_certificate 和 auto_generate_config
-    # 它们被移到了最外层，以确保始终执行
 }
 
-# ... (detect_installed_app, uninstall_app_type, handle_existing_installation 保持不变) ...
-# ... (参数解析逻辑 while 循环保持不变) ...
+detect_installed_app() {
+    local has_v2bx=false
+    local has_v2node=false
 
-# ... (主执行流) ...
+    if [[ -f /usr/local/V2bX/V2bX || -f /etc/systemd/system/V2bX.service || -f /etc/init.d/V2bX ]]; then
+        has_v2bx=true
+    fi
+    if [[ -f /usr/local/v2node/v2node || -f /etc/systemd/system/v2node.service || -f /etc/init.d/v2node ]]; then
+        has_v2node=true
+    fi
+
+    if [[ "$has_v2bx" == true && "$has_v2node" == true ]]; then
+        echo "both"
+    elif [[ "$has_v2bx" == true ]]; then
+        echo "v2bx"
+    elif [[ "$has_v2node" == true ]]; then
+        echo "v2node"
+    else
+        echo ""
+    fi
+}
+
+uninstall_app_type() {
+    local target="$1"
+    local uninstall_name=""
+    local uninstall_dir=""
+    local uninstall_config=""
+    local uninstall_bin=""
+    local uninstall_alias=""
+
+    if [[ "$target" == "v2bx" ]]; then
+        uninstall_name="V2bX"
+        uninstall_dir="/usr/local/V2bX/"
+        uninstall_config="/etc/V2bX/"
+        uninstall_bin="/usr/bin/V2bX"
+        uninstall_alias="/usr/bin/v2bx"
+    else
+        uninstall_name="v2node"
+        uninstall_dir="/usr/local/v2node/"
+        uninstall_config="/etc/v2node/"
+        uninstall_bin="/usr/bin/v2node"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop ${uninstall_name} >/dev/null 2>&1
+        systemctl disable ${uninstall_name} >/dev/null 2>&1
+        rm -f /etc/systemd/system/${uninstall_name}.service
+        systemctl daemon-reload >/dev/null 2>&1
+    else
+        service ${uninstall_name} stop >/dev/null 2>&1
+        rc-update del ${uninstall_name} default >/dev/null 2>&1
+        rm -f /etc/init.d/${uninstall_name}
+    fi
+
+    rm -rf ${uninstall_dir}
+    rm -rf ${uninstall_config}
+    rm -f ${uninstall_bin}
+    if [[ -n "$uninstall_alias" ]]; then
+        rm -f ${uninstall_alias}
+    fi
+}
+
+handle_existing_installation() {
+    local existing
+    existing=$(detect_installed_app)
+    if [[ "$existing" == "v2node" && "$app_type" == "v2bx" ]]; then
+        echo -e "${yellow}检测到已安装 v2node，将自动卸载并安装 V2bX${plain}"
+        uninstall_app_type "v2node"
+    elif [[ "$existing" == "v2bx" && "$app_type" == "v2node" ]]; then
+        echo -e "${yellow}检测到已安装 V2bX，将自动卸载并安装 v2node${plain}"
+        uninstall_app_type "v2bx"
+    elif [[ "$existing" == "both" ]]; then
+        if [[ "$app_type" == "v2bx" ]]; then
+            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 V2bX 并卸载 v2node${plain}"
+            uninstall_app_type "v2node"
+        else
+            echo -e "${yellow}检测到已安装 v2node 与 V2bX，将保留 v2node 并卸载 V2bX${plain}"
+            uninstall_app_type "v2bx"
+        fi
+    fi
+}
+
+install_base
+
+# 默认参数
+app_type="v2node"
+config_file_path=""
+version=""
+backend_url=""
+backend_key=""
+node_id=""
+core_type=""
+transport_type=""
+cert_domain=""
+acme_email=""
+cf_key=""
+cf_email=""
+cf_token=""
+cf_account_id=""
+auto_config_enabled=false
+force_reinstall=false
+
+trim_value() {
+    local v="$1"
+    v="${v//\`/}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    echo "$v"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --type|-t)
+            app_type="$2"
+            shift 2
+            ;;
+        --config|-c)
+            config_file_path="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --version|-v)
+            version="$2"
+            shift 2
+            ;;
+        --repo-base|-r)
+            repo_base_url="$2"
+            shift 2
+            ;;
+        --backend-url)
+            backend_url="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --backend-key)
+            backend_key="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --node-id)
+            node_id="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --core-type)
+            core_type="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --transport-type)
+            transport_type="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --cert-domain)
+            cert_domain="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --force-reinstall)
+            force_reinstall=true
+            shift
+            ;;
+        --acme-email)
+            acme_email="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --cf-key)
+            cf_key="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --cf-email)
+            cf_email="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --cf-token)
+            cf_token="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        --cf-account-id)
+            cf_account_id="$2"
+            auto_config_enabled=true
+            shift 2
+            ;;
+        *.yml|*.yaml)
+            config_file_path="$1"
+            auto_config_enabled=true
+            shift
+            ;;
+        *)
+            if [[ -z "$version" ]]; then
+                version="$1"
+            fi
+            shift
+            ;;
+    esac
+done
 
 # 规范化类型
 app_type=$(echo "$app_type" | tr '[:upper:]' '[:lower:]')
-# ... (变量设置逻辑) ...
+if [[ "$app_type" != "v2node" && "$app_type" != "v2bx" ]]; then
+    echo -e "${red}不支持的类型: $app_type，请使用 v2node 或 v2bx${plain}"
+    exit 1
+fi
+
+handle_existing_installation
+
+# 获取最新版本
+get_latest_version() {
+    local repo=$1
+    local version=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$version" ]]; then
+        local url=$(curl -Ls -o /dev/null -w %{url_effective} "https://github.com/$repo/releases/latest")
+        version=${url##*/}
+    fi
+    echo "$version"
+}
+
+# 根据类型设置变量
+if [[ "$app_type" == "v2node" ]]; then
+    app_name="v2node"
+    app_name_lower="v2node"
+    install_dir="/usr/local/v2node/"
+    config_dir="/etc/v2node/"
+    latest_version=$(get_latest_version "LiukerSun/v2node")
+    default_version="${latest_version:-v0.2.7}"
+    repo_base_url="${REPO_BASE_URL:-https://github.com/LiukerSun/v2node/releases/download}"
+elif [[ "$app_type" == "v2bx" ]]; then
+    app_name="V2bX"
+    app_name_lower="V2bX"
+    install_dir="/usr/local/V2bX/"
+    config_dir="/etc/V2bX/"
+    latest_version=$(get_latest_version "LiukerSun/v2bx")
+    default_version="${latest_version:-v0.4.1}"
+    repo_base_url="${REPO_BASE_URL:-https://github.com/LiukerSun/v2bx/releases/download}"
+fi
+
+# 设置版本
+if [[ -z "$version" ]]; then
+    version="${default_version}"
+fi
+if [[ "$version" != v* ]]; then
+    version="v$version"
+fi
 
 if [[ -n "$config_file_path" ]]; then
     parse_config_file "$config_file_path"
 fi
-# ... (trim_value 处理) ...
+
+repo_base_url=$(trim_value "$repo_base_url")
+backend_url=$(trim_value "$backend_url")
+backend_key=$(trim_value "$backend_key")
+node_id=$(trim_value "$node_id")
+core_type=$(trim_value "$core_type")
+transport_type=$(trim_value "$transport_type")
+cert_domain=$(trim_value "$cert_domain")
+acme_email=$(trim_value "$acme_email")
+cf_key=$(trim_value "$cf_key")
+cf_email=$(trim_value "$cf_email")
+cf_token=$(trim_value "$cf_token")
+cf_account_id=$(trim_value "$cf_account_id")
 
 if [[ "$auto_config_enabled" == true ]]; then
     validate_config
@@ -585,7 +952,7 @@ fi
 echo -e "${green}正在安装/更新 ${app_name} ${version}...${plain}"
 install_app "$version"
 
-# 🚀 重点修改：将配置和证书逻辑放到这里，无条件执行（只要参数开启了 auto_config）
+# 🚀 配置和证书更新逻辑（放在最后，确保每次运行都会执行）
 if [[ "$auto_config_enabled" == true ]]; then
     echo -e "${green}正在检查/申请 SSL 证书...${plain}"
     issue_certificate
