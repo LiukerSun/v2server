@@ -680,8 +680,16 @@ case "\$cmd" in
             exit 1
         fi
         ;;
+    version)
+        if [[ -f ${install_dir}${app_name} ]]; then
+            ${install_dir}${app_name} version
+        else
+            echo "未找到程序文件"
+            exit 1
+        fi
+        ;;
     *)
-        echo "用法: ${app_name_lower} {start|stop|restart|status|log|logs|enable|disable|config}"
+        echo "用法: ${app_name_lower} {start|stop|restart|status|log|logs|enable|disable|config|version}"
         exit 1
         ;;
 esac
